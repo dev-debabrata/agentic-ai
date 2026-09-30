@@ -1,0 +1,8 @@
+@if (auth.ready()) {
+  @if (auth.user()) {
+    <app-sidebar />
+    <app-chat-panel />
+  } @else {
+    <app-auth-page />
+  }
+}
