@@ -162,9 +162,11 @@ export class AuthPage {
       switch (this.mode()) {
         case 'signin':
           await this.auth.login(this.email(), this.password(), this.admin());
+          history.replaceState(null, '', this.admin() ? '/admin' : '/');
           break;
         case 'signup':
           await this.auth.signup(this.name(), this.email(), this.password());
+          history.replaceState(null, '', '/');
           break;
         case 'forgot':
           await this.api.forgotPassword(this.email());
