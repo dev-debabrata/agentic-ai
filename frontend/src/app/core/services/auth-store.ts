@@ -14,6 +14,12 @@ export class AuthStore {
   readonly ready = signal(false);
   readonly error = signal<string | null>(null);
   readonly isAdmin = computed(() => this.user()?.role === 'admin');
+  /** The token from a reset link (/reset-password?token=…), read before the app rewrites the URL. */
+  readonly resetToken = signal(
+    location.pathname === '/reset-password'
+      ? new URLSearchParams(location.search).get('token')
+      : null,
+  );
 
   async init() {
     try {
@@ -27,8 +33,9 @@ export class AuthStore {
     }
   }
 
-  async login(email: string, password: string) {
-    this.user.set(await this.api.login(email, password));
+  /** `admin` uses the admin sign-in, which refuses non-admin accounts. */
+  async login(email: string, password: string, admin = false) {
+    this.user.set(await this.api.login(email, password, admin));
     this.error.set(null);
   }
 

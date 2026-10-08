@@ -4,7 +4,34 @@
 
 .msg.user {
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 6px;
+  max-width: 78%;
+}
+.att-image {
+  max-width: 220px;
+  max-height: 180px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  object-fit: cover;
+}
+.att-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
 }
 .msg.user .bubble {
   max-width: 78%;
@@ -111,6 +138,27 @@
   border-color: color-mix(in srgb, var(--err) 40%, transparent);
 }
 
+.foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.speak {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--muted);
+}
+.speak:hover,
+.speak.active {
+  color: var(--text);
+  background: var(--panel-2);
+}
 .meta {
   font-size: 12px;
   color: var(--muted);

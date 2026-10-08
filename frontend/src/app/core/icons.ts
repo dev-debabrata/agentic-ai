@@ -1,5 +1,6 @@
 import {
   LucideArrowUp,
+  LucideAudioLines,
   LucideBot,
   LucideBrain,
   LucideCalculator,
@@ -16,9 +17,12 @@ import {
   LucideFileSearch,
   LucideFileText,
   LucideGlobe,
+  LucideLock,
   LucideLogOut,
   LucideMessageSquareText,
   LucideMoon,
+  LucidePaperclip,
+  LucidePencil,
   LucidePlus,
   LucideSearch,
   LucideSettings,
@@ -30,6 +34,7 @@ import {
   LucideTrash,
   LucideUpload,
   LucideUsers,
+  LucideVolume2,
   LucideWrench,
   LucideX,
   LucideZap,
@@ -41,6 +46,7 @@ import {
  */
 export const APP_ICONS = [
   LucideArrowUp,
+  LucideAudioLines,
   LucideBot,
   LucideBrain,
   LucideCalculator,
@@ -57,9 +63,12 @@ export const APP_ICONS = [
   LucideFileSearch,
   LucideFileText,
   LucideGlobe,
+  LucideLock,
   LucideLogOut,
   LucideMessageSquareText,
   LucideMoon,
+  LucidePaperclip,
+  LucidePencil,
   LucidePlus,
   LucideSearch,
   LucideSettings,
@@ -71,8 +80,8 @@ export const APP_ICONS = [
   LucideTrash,
   LucideUpload,
   LucideUsers,
+  LucideVolume2,
   LucideWrench,
   LucideX,
   LucideZap,
 ];
-

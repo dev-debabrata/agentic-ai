@@ -53,6 +53,34 @@ describe('App', () => {
     expect(el.querySelector('input[name="name"]')).not.toBeNull();
   });
 
+  it('shows field errors instead of submitting an empty form', async () => {
+    const { fixture, el } = await render(null);
+    (el.querySelector('button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    const errors = [...el.querySelectorAll('.field-error')].map((e) => e.textContent?.trim());
+    expect(errors).toEqual(['Enter your email.', 'Enter your password.']);
+    http.expectNone('/api/auth/login');
+  });
+
+  it('checks that sign-up passwords match', async () => {
+    const { fixture, el } = await render(null);
+    (el.querySelectorAll('.switch button')[1] as HTMLButtonElement).click();
+    await fixture.whenStable();
+    const type = (name: string, value: string) => {
+      const input = el.querySelector(`input[name="${name}"]`) as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('input'));
+    };
+    type('name', 'Ada');
+    type('email', 'ada@example.com');
+    type('password', 'correct horse');
+    type('confirm', 'correct hose');
+    (el.querySelector('button[type="submit"]') as HTMLButtonElement).click();
+    await fixture.whenStable();
+    expect(el.querySelector('.field-error')?.textContent).toContain("Passwords don't match.");
+    http.expectNone('/api/auth/signup');
+  });
+
   it('toggles password visibility with the eye icon', async () => {
     const { fixture, el } = await render(null);
     const reveal = el.querySelector('.reveal') as HTMLButtonElement;
@@ -73,7 +101,6 @@ describe('App', () => {
   it('shows the chat and the account once signed in', async () => {
     const { el } = await render(ADA);
     expect(el.querySelector('.welcome h2')?.textContent).toContain('What should we work on?');
-    expect(el.querySelectorAll('.suggestions button').length).toBe(4);
     expect(el.querySelector('.nav')?.textContent).toContain('Tools');
   });
 });

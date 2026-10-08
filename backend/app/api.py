@@ -1,17 +1,23 @@
 import asyncio
 import json
 import logging
+from typing import Literal
 
 import anthropic
+import openai
 from fastapi import APIRouter, HTTPException, Request, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sse_starlette.sse import EventSourceResponse
 
-from app.agent.loop import close_dangling_tool_calls
+from app.agent.profiles import PRESETS
+from app.attachments import MAX_ATTACHMENTS, Attachment, AttachmentError, user_content
 from app.auth import CurrentUser
 from app.rag import SUPPORTED_EXTENSIONS, UnsupportedFileError
 from app.tools import ToolContext
-from app.transcript import to_transcript
+from app.transcript import openai_transcript, to_transcript
+
+# How to display a stored session, by the provider its history was written for.
+TRANSCRIPTS = {"anthropic": to_transcript, "openai": openai_transcript}
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -21,8 +27,28 @@ _active_sessions: set[str] = set()
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=100_000)
+    message: str = Field(default="", max_length=100_000)
+    attachments: list[Attachment] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
     session_id: str | None = None
+    agent_id: str | None = None  # only used when starting a new session
+
+    @model_validator(mode="after")
+    def _not_empty(self):
+        if not self.message.strip() and not self.attachments:
+            raise ValueError("Send a message or attach a file")
+        return self
+
+
+class AgentIn(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=60)
+    role: str = Field(default="", max_length=80)
+    icon: str = Field(default="bot", max_length=40)
+    description: str = Field(default="", max_length=500)
+    instructions: str = Field(default="", max_length=8000)
+    tools: list[str] = Field(default_factory=list, max_length=50)
+    provider: Literal["", "anthropic", "openai"] = ""  # '' = the app's default provider
 
 
 class RenameRequest(BaseModel):
@@ -41,6 +67,14 @@ def _error_message(exc: Exception) -> str:
         return f"Claude API error ({exc.status_code}): {exc.message}"
     if isinstance(exc, anthropic.APIConnectionError):
         return "Could not reach the Claude API. Check the backend's network connection."
+    if isinstance(exc, openai.AuthenticationError):
+        return "OpenAI authentication failed - check OPENAI_API_KEY in backend/.env."
+    if isinstance(exc, openai.RateLimitError):
+        return "Rate limited by the OpenAI API (or out of credits). Wait a moment and try again."
+    if isinstance(exc, openai.APIStatusError):
+        return f"OpenAI API error ({exc.status_code}): {exc.message}"
+    if isinstance(exc, openai.APIConnectionError):
+        return "Could not reach the OpenAI API. Check the backend's network connection."
     return f"Unexpected error: {type(exc).__name__}: {exc}"
 
 
@@ -59,12 +93,58 @@ def _sse(event: str, data: dict) -> dict:
 @router.get("/health")
 async def health(request: Request):
     s = request.app.state.settings
-    return {"status": "ok", "model": s.model, "effort": s.effort, "web_tools": s.enable_web_tools}
+    return {
+        "status": "ok", "model": s.model, "effort": s.effort, "web_tools": s.enable_web_tools,
+        "providers": sorted(request.app.state.runners), "default_provider": s.default_provider,
+    }
 
 
 @router.get("/tools")
 async def list_tools(request: Request, _: CurrentUser):
     return request.app.state.agent.catalog
+
+
+def _agent_fields(request: Request, body: AgentIn) -> dict:
+    known = {t["name"] for t in request.app.state.agent.catalog}
+    if unknown := sorted(set(body.tools) - known):
+        raise HTTPException(422, f"Unknown tools: {', '.join(unknown)}")
+    return {**body.model_dump(), "tools": sorted(set(body.tools))}
+
+
+def _user_agents(store, user_id: str) -> list[dict]:
+    # A user's first look at agents gives them editable copies of the built-in ones.
+    return store.list_agents(user_id) or store.seed_agents(user_id, PRESETS)
+
+
+@router.get("/agents")
+async def list_agents(request: Request, user: CurrentUser):
+    return _user_agents(request.app.state.store, user["id"])
+
+
+@router.post("/agents", status_code=201)
+async def create_agent(body: AgentIn, request: Request, user: CurrentUser):
+    store = request.app.state.store
+    _user_agents(store, user["id"])
+    return store.create_agent(user["id"], _agent_fields(request, body))
+
+
+@router.put("/agents/{agent_id}")
+async def update_agent(agent_id: str, body: AgentIn, request: Request, user: CurrentUser):
+    agent = request.app.state.store.update_agent(user["id"], agent_id, _agent_fields(request, body))
+    if agent is None:
+        raise HTTPException(404, "Agent not found")
+    return agent
+
+
+@router.delete("/agents/{agent_id}", status_code=204)
+async def delete_agent(agent_id: str, request: Request, user: CurrentUser):
+    store = request.app.state.store
+    agents = store.list_agents(user["id"])
+    if all(a["id"] != agent_id for a in agents):
+        raise HTTPException(404, "Agent not found")
+    if len(agents) == 1:
+        raise HTTPException(409, "Keep at least one agent.")
+    store.delete_agent(user["id"], agent_id)
 
 
 @router.get("/sessions")
@@ -80,7 +160,7 @@ async def create_session(request: Request, user: CurrentUser):
 @router.get("/sessions/{session_id}")
 async def get_session(session_id: str, request: Request, user: CurrentUser):
     session = _session_or_404(request, user, session_id)
-    session["messages"] = to_transcript(session["messages"])
+    session["messages"] = TRANSCRIPTS[session["provider"]](session["messages"])
     return session
 
 
@@ -139,13 +219,28 @@ async def delete_document(doc_id: str, request: Request, user: CurrentUser):
 @router.post("/chat")
 async def chat(body: ChatRequest, request: Request, user: CurrentUser):
     store = request.app.state.store
-    agent = request.app.state.agent
     settings = request.app.state.settings
+
+    # Validate attachments before creating a session for them.
+    try:
+        content = user_content(body.message, body.attachments, settings.max_upload_mb * 1024 * 1024)
+    except AttachmentError as e:
+        raise HTTPException(422, str(e))
 
     if body.session_id:
         session = _session_or_404(request, user, body.session_id)
+        provider = session["provider"]
     else:
-        session = {**store.create_session(user["id"]), "messages": []}
+        agent_profile = store.get_agent(user["id"], body.agent_id) if body.agent_id else None
+        if body.agent_id and agent_profile is None:
+            raise HTTPException(404, "Agent not found")
+        # A chat keeps the provider it starts with: its history is stored in that provider's format.
+        provider = (agent_profile and agent_profile["provider"]) or settings.default_provider
+    runner = request.app.state.runners.get(provider)
+    if runner is None:
+        raise HTTPException(400, "OpenAI isn't set up. Add OPENAI_API_KEY to backend/.env and restart the backend.")
+    if not body.session_id:
+        session = {**store.create_session(user["id"], agent_id=body.agent_id, provider=provider), "messages": []}
 
     session_id = session["id"]
     if session_id in _active_sessions:
@@ -153,21 +248,23 @@ async def chat(body: ChatRequest, request: Request, user: CurrentUser):
 
     messages = session["messages"]
     if not messages:
-        title = body.message.strip().splitlines()[0][:60]
+        title = (body.message.strip() or body.attachments[0].name).splitlines()[0][:60]
         store.rename_session(user["id"], session_id, title)
         session["title"] = title
-    messages.append({"role": "user", "content": body.message})
+    messages.append({"role": "user", "content": runner.user_content(content)})
     start_len = len(messages)
 
     workspace = settings.user_workspace(user["id"])
     workspace.mkdir(parents=True, exist_ok=True)
     ctx = ToolContext(store=store, workspace=workspace, user_id=user["id"], kb=request.app.state.kb)
+    # The agent's current settings apply on every turn, so edits take effect in existing chats.
+    profile = store.get_agent(user["id"], session["agent_id"]) if session.get("agent_id") else None
 
     async def events():
         _active_sessions.add(session_id)
         try:
-            yield _sse("session", {"id": session_id, "title": session["title"]})
-            async for ev in agent.run(messages, ctx):
+            yield _sse("session", {"id": session_id, "title": session["title"], "agent_id": session.get("agent_id")})
+            async for ev in runner.run(messages, ctx, profile):
                 yield _sse(ev["event"], ev["data"])
         except Exception as exc:
             log.exception("agent run failed")
@@ -175,8 +272,12 @@ async def chat(body: ChatRequest, request: Request, user: CurrentUser):
                 messages.pop()  # nothing happened; don't keep the unanswered message
             yield _sse("error", {"message": _error_message(exc)})
         finally:
-            close_dangling_tool_calls(messages)
-            store.save_messages(session_id, messages)
+            runner.close_dangling(messages)
+            if messages:
+                store.save_messages(session_id, messages)
+            else:
+                # The first message failed outright; don't leave an empty chat in the sidebar.
+                store.delete_session(user["id"], session_id)
             _active_sessions.discard(session_id)
 
     return EventSourceResponse(events())

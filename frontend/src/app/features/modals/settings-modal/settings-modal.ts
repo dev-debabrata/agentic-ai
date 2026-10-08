@@ -1,15 +1,21 @@
 import { Component, HostListener, inject, input, output, signal } from '@angular/core';
 import { LucideDynamicIcon } from '@lucide/angular';
 
-import { AccentColor, AppTheme, FontSize, SettingsStore } from '../../../core/services/settings-store';
+import {
+  AccentColor,
+  AppTheme,
+  FontSize,
+  SettingsStore,
+} from '../../../core/services/settings-store';
 import { AuthStore } from '../../../core/services/auth-store';
 import { ChatStore } from '../../../core/services/chat-store';
+import { ChangePassword } from './change-password/change-password';
 
-export type SettingsTab = 'appearance' | 'agent' | 'chat' | 'data' | 'account';
+export type SettingsTab = 'appearance' | 'agent' | 'chat' | 'data' | 'account' | 'security';
 
 @Component({
   selector: 'app-settings-modal',
-  imports: [LucideDynamicIcon],
+  imports: [LucideDynamicIcon, ChangePassword],
   templateUrl: './settings-modal.html',
   styleUrl: './settings-modal.css',
 })
@@ -26,7 +32,7 @@ export class SettingsModal {
   protected readonly cacheCleared = signal(false);
 
   protected readonly accents: { id: AccentColor; label: string; color: string }[] = [
-    { id: 'violet', label: 'Violet', color: '#8b5cf6' },
+    { id: 'mono', label: 'Mono', color: 'var(--text)' },
     { id: 'blue', label: 'Blue', color: '#2563eb' },
     { id: 'emerald', label: 'Emerald', color: '#059669' },
     { id: 'amber', label: 'Amber', color: '#d97706' },

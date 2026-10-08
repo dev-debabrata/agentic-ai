@@ -1,6 +1,8 @@
 export interface SessionSummary {
   id: string;
   title: string;
+  /** The agent the chat runs as; null for plain Synora (older chats or a deleted agent). */
+  agent_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -28,9 +30,24 @@ export interface NoticePart {
 
 export type Part = TextPart | ToolPart | NoticePart;
 
+/** A file attached to a user message, as displayed (`url` is set for images). */
+export interface Attachment {
+  name: string;
+  media_type: string;
+  url?: string;
+}
+
+/** A file attached to an outgoing message: base64 content without the `data:` prefix. */
+export interface OutgoingAttachment {
+  name: string;
+  media_type: string;
+  data: string;
+}
+
 export interface UserMessage {
   role: 'user';
   text: string;
+  attachments?: Attachment[];
 }
 
 export interface Usage {
@@ -53,6 +70,33 @@ export type ChatMessage = UserMessage | AssistantMessage;
 
 export interface SessionDetail extends SessionSummary {
   messages: ChatMessage[];
+}
+
+/** The editable part of an agent profile. */
+export interface AgentInput {
+  name: string;
+  role: string;
+  icon: string;
+  description: string;
+  instructions: string;
+  /** Tool names from /api/tools. */
+  tools: string[];
+  /** '' runs on the app's default provider. */
+  provider: '' | Provider;
+}
+
+export interface AgentProfile extends AgentInput {
+  id: string;
+  created_at: string;
+}
+
+/** Body of POST /api/chat. */
+export interface ChatRequest {
+  message: string;
+  attachments: OutgoingAttachment[];
+  session_id: string | null;
+  /** Only used when starting a new session. */
+  agent_id: string | null;
 }
 
 export interface Note {
@@ -92,9 +136,14 @@ export interface User {
   created_at: string;
 }
 
+export type Provider = 'anthropic' | 'openai';
+
 export interface Health {
   model: string;
   effort: string;
+  /** Providers the backend has keys for. */
+  providers: Provider[];
+  default_provider: Provider;
 }
 
 /** An event from the backend's /api/chat SSE stream. */

@@ -4,6 +4,9 @@ import { firstValueFrom } from 'rxjs';
 
 import {
   AgentEvent,
+  AgentInput,
+  AgentProfile,
+  ChatRequest,
   DocumentList,
   Health,
   KnowledgeDocument,
@@ -44,10 +47,16 @@ export class AgentApi {
 
   // The login is an httpOnly cookie on /api, so these calls never handle a token themselves.
   me = () => this.get<User>('/auth/me');
-  login = (email: string, password: string) => this.post<User>('/auth/login', { email, password });
+  login = (email: string, password: string, admin = false) =>
+    this.post<User>(admin ? '/auth/admin/login' : '/auth/login', { email, password });
   signup = (name: string, email: string, password: string) =>
     this.post<User>('/auth/signup', { name, email, password });
   logout = () => this.post<void>('/auth/logout', {});
+  changePassword = (current_password: string, new_password: string) =>
+    this.post<void>('/auth/password', { current_password, new_password });
+  forgotPassword = (email: string) => this.post<void>('/auth/forgot', { email });
+  resetPassword = (token: string, new_password: string) =>
+    this.post<void>('/auth/reset', { token, new_password });
   users = () => this.get<User[]>('/admin/users');
   updateUser = (id: string, patch: Partial<Pick<User, 'role' | 'disabled'>>) =>
     firstValueFrom(this.http.patch<User>(`${API}/admin/users/${id}`, patch));
@@ -59,6 +68,11 @@ export class AgentApi {
   deleteSession = (id: string) => this.del(`/sessions/${id}`);
   notes = () => this.get<Note[]>('/notes');
   deleteNote = (id: number) => this.del(`/notes/${id}`);
+  agents = () => this.get<AgentProfile[]>('/agents');
+  createAgent = (agent: AgentInput) => this.post<AgentProfile>('/agents', agent);
+  updateAgent = (id: string, agent: AgentInput) =>
+    firstValueFrom(this.http.put<AgentProfile>(`${API}/agents/${id}`, agent));
+  deleteAgent = (id: string) => this.del(`/agents/${id}`);
   documents = () => this.get<DocumentList>('/documents');
   deleteDocument = (id: string) => this.del(`/documents/${id}`);
 
@@ -69,20 +83,21 @@ export class AgentApi {
   }
 
   async chat(
-    message: string,
-    sessionId: string | null,
+    body: ChatRequest,
     onEvent: (ev: AgentEvent) => void,
     signal: AbortSignal,
   ): Promise<void> {
     const res = await fetch(`${API}/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
-      body: JSON.stringify({ message, session_id: sessionId }),
+      body: JSON.stringify(body),
       signal,
     });
     if (!res.ok || !res.body) {
-      const detail = await res.json().catch(() => null);
-      throw new ApiError(detail?.detail ?? `Request failed (${res.status})`, res.status);
+      const detail = (await res.json().catch(() => null))?.detail;
+      // FastAPI's own validation errors are a list; ours are a string.
+      const msg = typeof detail === 'string' ? detail : (detail?.[0]?.msg ?? null);
+      throw new ApiError(msg ?? `Request failed (${res.status})`, res.status);
     }
 
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();

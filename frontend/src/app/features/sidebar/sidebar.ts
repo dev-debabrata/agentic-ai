@@ -3,12 +3,12 @@ import { LucideDynamicIcon } from '@lucide/angular';
 
 import { SessionSummary } from '../../core/models/chat.models';
 import { AuthStore } from '../../core/services/auth-store';
-import { ChatStore } from '../../core/services/chat-store';
+import { ActiveView, ChatStore } from '../../core/services/chat-store';
 import { SettingsStore } from '../../core/services/settings-store';
 import { SettingsModal } from '../modals/settings-modal/settings-modal';
 import { UpgradeModal } from '../modals/upgrade-modal/upgrade-modal';
 
-type Tab = 'chat' | 'agents' | 'docs' | 'memory' | 'tools';
+type Tab = ActiveView;
 interface TabDef {
   id: Tab;
   label: string;
@@ -17,6 +17,20 @@ interface TabDef {
 }
 
 const DAY = 24 * 60 * 60 * 1000;
+
+/** "Today", "Yesterday", "2 days ago", "3 days ago", then the date ("5 Oct", or "5 Oct 2025" in past years). */
+function dayLabel(date: Date, startOfToday: number, thisYear: number): string {
+  // Round so a DST shift between the two midnights doesn't skew the count.
+  const days = Math.round((startOfToday - new Date(date).setHours(0, 0, 0, 0)) / DAY);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  if (days <= 3) return `${days} days ago`;
+  return date.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: date.getFullYear() === thisYear ? undefined : 'numeric',
+  });
+}
 
 /** Left panel: navigation, conversations history, and user profile account menu. */
 @Component({
@@ -36,7 +50,12 @@ export class Sidebar {
   protected readonly upgradeOpen = signal(false);
   protected readonly tabs = computed<TabDef[]>(() => [
     { id: 'chat', label: 'Chats', icon: 'message-square-text' },
-    { id: 'agents', label: 'AI Agents', icon: 'bot', count: () => 5 },
+    {
+      id: 'agents',
+      label: 'AI Agents',
+      icon: 'bot',
+      count: () => this.store.agents().length,
+    },
     {
       id: 'docs',
       label: 'Docs',
@@ -45,6 +64,7 @@ export class Sidebar {
     },
     { id: 'memory', label: 'Memory', icon: 'brain', count: () => this.store.notes().length },
     { id: 'tools', label: 'Tools', icon: 'wrench', count: () => this.store.tools().length },
+    ...(this.auth.isAdmin() ? [{ id: 'users' as const, label: 'Users', icon: 'users' }] : []),
   ]);
 
   protected onNavClick(id: Tab) {
@@ -54,19 +74,13 @@ export class Sidebar {
     () => this.auth.user()?.name.trim().charAt(0).toUpperCase() || '?',
   );
 
-  /** Chats bucketed by last activity (sessions arrive newest first). */
+  /** Chats bucketed by the calendar day of last activity (sessions arrive newest first). */
   protected readonly chatGroups = computed(() => {
-    const startOfToday = new Date().setHours(0, 0, 0, 0);
-    const buckets: [string, number][] = [
-      ['Today', startOfToday],
-      ['Yesterday', startOfToday - DAY],
-      ['Previous 7 days', startOfToday - 7 * DAY],
-      ['Older', -Infinity],
-    ];
+    const now = new Date();
+    const startOfToday = new Date(now).setHours(0, 0, 0, 0);
     const groups = new Map<string, SessionSummary[]>();
     for (const s of this.store.sessions()) {
-      const t = Date.parse(s.updated_at);
-      const [label] = buckets.find(([, since]) => t >= since)!;
+      const label = dayLabel(new Date(s.updated_at), startOfToday, now.getFullYear());
       groups.set(label, [...(groups.get(label) ?? []), s]);
     }
     return [...groups].map(([label, sessions]) => ({ label, sessions }));
@@ -97,4 +111,3 @@ export class Sidebar {
     }
   }
 }
-

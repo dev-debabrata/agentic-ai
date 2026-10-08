@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
 
     model: str = "claude-opus-5"
+    # OpenAI, optional: agents (or the whole app, via default_provider) can run on it instead.
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
+    openai_model: str = "gpt-5"
+    # The provider for plain chats and for agents set to "Default".
+    default_provider: Literal["anthropic", "openai"] = "anthropic"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = 64000
     max_iterations: int = 25
@@ -38,6 +43,15 @@ class Settings(BaseSettings):
     login_days: int = 7
     # Send the login cookie over HTTPS only. Turn on in production (plain-HTTP dev can't use it).
     cookie_secure: bool = False
+
+    # Password reset. Links point at the frontend; with no SMTP host they're logged instead.
+    app_url: str = "http://localhost:4200"
+    reset_minutes: int = 30
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str = "Synora <no-reply@localhost>"
 
     @property
     def db_path(self) -> Path:

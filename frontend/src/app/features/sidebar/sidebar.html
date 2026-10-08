@@ -1,7 +1,7 @@
 <div class="brand">
-  <div class="logo">S</div>
+  <img class="logo" src="logo.svg" alt="Synora AI" />
   <div>
-    <div class="brand-name">Synora</div>
+    <div class="brand-name">Synora <span class="brand-ai">AI</span></div>
     <div class="brand-sub">Agentic AI assistant</div>
   </div>
 </div>
@@ -105,7 +105,7 @@
         <div class="avatar">{{ initial() }}</div>
         <div class="who">
           <div class="truncate name">{{ u.name }}</div>
-          <div class="truncate sub">{{ auth.isAdmin() ? 'Admin' : 'Workspace' }} · {{ u.email }}</div>
+          <div class="truncate sub">{{ auth.isAdmin() ? 'Admin · ' : '' }}{{ u.email }}</div>
         </div>
         <div class="menu-trigger" title="Open user menu">
           <svg [lucideIcon]="menuOpen() ? 'chevron-down' : 'chevron-up'" size="16"></svg>

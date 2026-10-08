@@ -57,6 +57,16 @@ The `finally` block in the route always persists `messages` to SQLite.
 - Roles are `user` and `admin`. The first account to sign up becomes admin and claims pre-account data:
   rows with a NULL `user_id` (`Store.create_user`) and loose workspace files (`claim_legacy_workspace`).
   Admins can't change their own role or status, so at least one admin always remains.
+- Admins and users sign in separately: `POST /api/auth/login` refuses admins and
+  `POST /api/auth/admin/login` (the `/admin` page, `AuthPage` with `[admin]="true"`) refuses non-admins,
+  both before creating a session. Sign-up still logs in the first account, which becomes admin.
+- Passwords: `POST /api/auth/password` (change; signs out the user's other logins),
+  `/api/auth/forgot` (always 202, so it doesn't reveal which emails exist; sends after responding) and
+  `/api/auth/reset`. Reset tokens are single-use and hashed (`password_resets`). `app/mailer.py` emails
+  the link via `AGENT_SMTP_*`, or logs it when no SMTP host is set. The frontend reads
+  `/reset-password?token=` into `AuthStore.resetToken` before the URL sync rewrites the address.
+- Frontend pages map to URLs in `app.ts` (`PATHS`; Users is `/admin`). `ChatStore.canView` is the route
+  guard: `setActiveView` sends a refused page to the chat.
 - Everything user-owned is scoped by `user_id`. `Store` methods take `user_id` first. Another user's
   session or note is reported as 404, not 403. Tools read `ctx.user_id`, and each user's file workspace is
   `AGENT_WORKSPACE_DIR/<user_id>`.
@@ -146,6 +156,30 @@ The loop handles these stop reasons:
   runs them, and their results arrive as content blocks (`server_tool_use`, `*_tool_result`), never
   through local execution. `AGENT_ENABLE_WEB_TOOLS` gates them.
 - File tools resolve every path inside `AGENT_WORKSPACE_DIR` and reject escapes (`files.py::_resolve`).
+
+### Agent profiles
+
+- An agent is a per-user `agents` row: name, role, icon, description, `instructions`, and a `tools`
+  list of tool names. `GET /api/agents` seeds a user's editable copies of `PRESETS`
+  (`app/agent/profiles.py`) the first time; a user must keep at least one agent.
+- A session stores `agent_id` when it is created (`ChatRequest.agent_id` is ignored for existing
+  sessions). NULL, or an agent that was deleted, means plain Synora with every tool.
+- `Agent.run(messages, ctx, profile)` appends the profile's role and instructions to `SYSTEM_PROMPT`
+  (`system_prompt()`), sends only the profile's tools (filtered, so order stays sorted), and rejects
+  calls to any other tool. The profile is re-read every turn, so edits apply to existing chats.
+
+### Providers (Claude and OpenAI)
+
+- `app.state.runners` maps a provider to its loop: `"anthropic"` (`Agent`, always) and `"openai"`
+  (`OpenAIAgent` in `app/agent/openai_loop.py`, only when `OPENAI_API_KEY` is set).
+- A session's `provider` is fixed when it is created: the agent's `provider`, or else
+  `AGENT_DEFAULT_PROVIDER`. NULL means anthropic. Its history is stored in that provider's message
+  format, so the route uses the runner's `user_content` / `close_dangling` hooks and
+  `TRANSCRIPTS[provider]` (`to_transcript` / `openai_transcript`).
+- `OpenAIAgent` uses Chat Completions streaming and yields the same UI events as `Agent`. It has no
+  server tools (web search/fetch) and no thinking events. Tool results that are errors carry an
+  `Error: ` prefix, since Chat Completions tool messages have no error flag. `tests/test_openai.py`
+  drives the real `openai` SDK (also `httpx2`-based) against canned SSE.
 
 ### Persistence and RAG
 

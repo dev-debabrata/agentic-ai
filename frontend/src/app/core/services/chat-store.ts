@@ -4,19 +4,23 @@ import { AgentApi, ApiError } from './agent-api';
 import { AuthStore } from './auth-store';
 import {
   AgentEvent,
+  AgentInput,
+  AgentProfile,
   AssistantMessage,
   ChatMessage,
   Health,
   KnowledgeDocument,
   Note,
+  OutgoingAttachment,
   SessionSummary,
   ToolInfo,
 } from '../models/chat.models';
+import { toDisplay } from '../utils/attachments';
 import { reduceEvent } from '../utils/reduce-event';
 
 const NOTE_TOOLS = new Set(['save_note', 'delete_note']);
 
-export type ActiveView = 'chat' | 'agents' | 'docs' | 'memory' | 'tools';
+export type ActiveView = 'chat' | 'agents' | 'docs' | 'memory' | 'tools' | 'users';
 
 @Injectable({ providedIn: 'root' })
 export class ChatStore {
@@ -32,9 +36,13 @@ export class ChatStore {
   readonly notes = signal<Note[]>([]);
   readonly tools = signal<ToolInfo[]>([]);
   readonly health = signal<Health | null>(null);
-  /** Round-trip time of the startup health check. */
-  readonly latencyMs = signal<number | null>(null);
   readonly error = signal<string | null>(null);
+  readonly agents = signal<AgentProfile[]>([]);
+  /** The agent for the open chat, or for the next new chat; null is plain Synora. */
+  readonly agentId = signal<string | null>(null);
+  readonly currentAgent = computed(
+    () => this.agents().find((a) => a.id === this.agentId()) ?? null,
+  );
   readonly documents = signal<KnowledgeDocument[]>([]);
   readonly supportedTypes = signal<string[]>([]);
   readonly uploading = signal<string | null>(null);
@@ -49,15 +57,15 @@ export class ChatStore {
 
   async init() {
     try {
-      const started = performance.now();
-      const timedHealth = this.api.health().then((h) => {
-        this.latencyMs.set(Math.round(performance.now() - started));
-        return h;
-      });
-      const [health, tools] = await Promise.all([timedHealth, this.api.tools()]);
+      const [health, tools] = await Promise.all([this.api.health(), this.api.tools()]);
       this.health.set(health);
       this.tools.set(tools);
-      await Promise.all([this.refreshSessions(), this.refreshNotes(), this.refreshDocuments()]);
+      await Promise.all([
+        this.refreshSessions(),
+        this.refreshNotes(),
+        this.refreshDocuments(),
+        this.refreshAgents(),
+      ]);
     } catch {
       if (this.auth.user()) {
         this.error.set('Cannot reach the backend. Start it with: uvicorn app.main:app --port 8000');
@@ -73,8 +81,9 @@ export class ChatStore {
     this.messages.set([]);
     this.notes.set([]);
     this.tools.set([]);
-    this.latencyMs.set(null);
     this.documents.set([]);
+    this.agents.set([]);
+    this.agentId.set(null);
     this.error.set(null);
     this.uploadError.set(null);
   }
@@ -85,6 +94,23 @@ export class ChatStore {
 
   async refreshNotes() {
     this.notes.set(await this.api.notes());
+  }
+
+  async refreshAgents() {
+    this.agents.set(await this.api.agents());
+  }
+
+  /** Create (no id) or update an agent. */
+  async saveAgent(agent: AgentInput, id?: string) {
+    const saved = id ? await this.api.updateAgent(id, agent) : await this.api.createAgent(agent);
+    this.agents.update((l) => (id ? l.map((a) => (a.id === id ? saved : a)) : [...l, saved]));
+    return saved;
+  }
+
+  async deleteAgent(id: string) {
+    await this.api.deleteAgent(id);
+    this.agents.update((l) => l.filter((a) => a.id !== id));
+    if (this.agentId() === id && !this.currentId()) this.agentId.set(null);
   }
 
   async refreshDocuments() {
@@ -113,14 +139,25 @@ export class ChatStore {
     this.documents.update((l) => l.filter((d) => d.id !== id));
   }
 
-  setActiveView(view: ActiveView) {
-    this.activeView.set(view);
+  /**
+   * Route guard: the Users page (/admin) is for admins. Signed out, it stays allowed so /admin
+   * can show the admin sign-in.
+   */
+  canView(view: ActiveView) {
+    return view !== 'users' || !this.auth.user() || this.auth.isAdmin();
   }
 
-  newChat() {
+  /** Navigate; a page the guard refuses opens the chat instead. */
+  setActiveView(view: ActiveView) {
+    this.activeView.set(this.canView(view) ? view : 'chat');
+  }
+
+  /** Start a new chat, optionally running as one of the user's agents. */
+  newChat(agentId: string | null = null) {
     this.activeView.set('chat');
     if (this.running()) return;
     this.currentId.set(null);
+    this.agentId.set(agentId);
     this.messages.set([]);
   }
 
@@ -129,6 +166,7 @@ export class ChatStore {
     if (this.running() || id === this.currentId()) return;
     const session = await this.api.session(id);
     this.currentId.set(id);
+    this.agentId.set(session.agent_id);
     this.messages.set(session.messages);
   }
 
@@ -147,15 +185,16 @@ export class ChatStore {
     this.abort?.abort();
   }
 
-  async send(text: string) {
+  async send(text: string, attachments: OutgoingAttachment[] = []) {
     text = text.trim();
-    if (!text || this.running()) return;
+    if ((!text && !attachments.length) || this.running()) return;
 
     this.error.set(null);
     this.running.set(true);
     this.abort = new AbortController();
     const assistant: AssistantMessage = { role: 'assistant', parts: [], running: true };
-    this.messages.update((m) => [...m, { role: 'user', text }, assistant]);
+    const user = { role: 'user' as const, text, attachments: attachments.map(toDisplay) };
+    this.messages.update((m) => [...m, user, assistant]);
 
     // Tokens arrive far faster than the screen refreshes; apply them once per frame so
     // each message re-renders (and re-parses its Markdown) at most ~60 times a second.
@@ -176,7 +215,13 @@ export class ChatStore {
     };
 
     try {
-      await this.api.chat(text, this.currentId(), onEvent, this.abort.signal);
+      const body = {
+        message: text,
+        attachments,
+        session_id: this.currentId(),
+        agent_id: this.agentId(),
+      };
+      await this.api.chat(body, onEvent, this.abort.signal);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return this.auth.expire();
       const aborted = e instanceof DOMException && e.name === 'AbortError';
@@ -191,8 +236,10 @@ export class ChatStore {
       this.patchLastAssistant((msg) => ({ ...msg, running: false }));
       this.running.set(false);
       this.abort = null;
-      // The run may have created or renamed the session, or changed memory.
-      this.refreshSessions();
+      // The run may have created, renamed, or (if its first message failed) deleted the session.
+      this.refreshSessions().then(() => {
+        if (!this.sessions().some((s) => s.id === this.currentId())) this.currentId.set(null);
+      });
       if (touchedNotes) this.refreshNotes();
     }
   }

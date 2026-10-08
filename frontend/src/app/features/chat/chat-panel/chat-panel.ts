@@ -1,7 +1,11 @@
 import { Component, ElementRef, computed, effect, inject, signal, viewChild } from '@angular/core';
 import { LucideDynamicIcon } from '@lucide/angular';
 
+import { OutgoingAttachment } from '../../../core/models/chat.models';
 import { ChatStore } from '../../../core/services/chat-store';
+import { IMAGE_TYPES, readAttachment, toDisplay } from '../../../core/utils/attachments';
+import { ComposerMenu } from '../composer-menu/composer-menu';
+import { VoiceInput } from '../voice-input/voice-input';
 import { Message } from '../message/message';
 
 export interface PromptType {
@@ -10,44 +14,31 @@ export interface PromptType {
   icon: string;
   placeholder: string;
   prefix?: string;
-  sample: string;
   description: string;
 }
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // the Claude API's per-image limit
+const MAX_ATTACHMENTS = 10; // matches the backend
 
 /** The main conversation area: top bar, message thread, welcome screen, and composer with prompt types. */
 @Component({
   selector: 'app-chat-panel',
-  imports: [LucideDynamicIcon, Message],
+  imports: [LucideDynamicIcon, Message, ComposerMenu, VoiceInput],
   templateUrl: './chat-panel.html',
   styleUrl: './chat-panel.css',
+  // An empty chat centers the welcome with the composer right under it (see .empty in the CSS).
+  host: { '[class.empty]': '!store.messages().length' },
 })
 export class ChatPanel {
   protected readonly store = inject(ChatStore);
   protected readonly draft = signal('');
-  protected readonly showRuntime = signal(true);
-
-  protected readonly suggestions = [
-    {
-      icon: 'globe',
-      label: 'Web search & docs',
-      text: 'Research the latest stable Python release and summarize what changed, with sources.',
-    },
-    {
-      icon: 'brain',
-      label: 'Memory retention',
-      text: 'Remember that I prefer concise answers and I work mostly in Python and Angular.',
-    },
-    {
-      icon: 'calculator',
-      label: 'Symbolic math',
-      text: 'What is the compound interest on ₹2,50,000 at 7.5% for 12 years? Show the math.',
-    },
-    {
-      icon: 'file-search',
-      label: 'Vector synthesis',
-      text: 'Summarize the documents in my knowledge base and list the key facts from each.',
-    },
-  ];
+  protected readonly attachments = signal<OutgoingAttachment[]>([]);
+  protected readonly previews = computed(() => this.attachments().map(toDisplay));
+  protected readonly attachError = signal<string | null>(null);
+  /** Images, PDFs, and the text/code extensions the backend reads. */
+  protected readonly accept = computed(() =>
+    [...IMAGE_TYPES, ...this.store.supportedTypes()].join(','),
+  );
 
   protected readonly promptTypes: PromptType[] = [
     {
@@ -55,7 +46,6 @@ export class ChatPanel {
       label: 'Auto Agent',
       icon: 'sparkles',
       placeholder: 'Message Synora… (Auto-detects tools, web search, files & math)',
-      sample: 'Plan and execute a complete solution for my task.',
       description: 'Autonomous multi-tool coordinator',
     },
     {
@@ -64,7 +54,6 @@ export class ChatPanel {
       icon: 'globe',
       placeholder: 'Search the live web for verified facts, sources & news…',
       prefix: '[Web Search]: ',
-      sample: 'Research the latest stable Python and Angular features with citations.',
       description: 'Real-time online search & page fetch',
     },
     {
@@ -73,7 +62,6 @@ export class ChatPanel {
       icon: 'code',
       placeholder: 'Create files, edit code or inspect your private workspace…',
       prefix: '[Workspace Code]: ',
-      sample: 'Write a Python utility script to process JSON files and save it to my workspace.',
       description: 'Sandboxed file reads and writes',
     },
     {
@@ -82,7 +70,6 @@ export class ChatPanel {
       icon: 'file-search',
       placeholder: 'Ask questions grounded in your uploaded documents…',
       prefix: '[Knowledge Base RAG]: ',
-      sample: 'Summarize the documents in my knowledge base and list the key points.',
       description: 'Chroma vector database search',
     },
     {
@@ -91,7 +78,6 @@ export class ChatPanel {
       icon: 'brain',
       placeholder: 'Tell Synora what facts or preferences to remember long-term…',
       prefix: '[Remember]: ',
-      sample: 'Remember that I prefer concise answers and clean modular code.',
       description: 'Cross-session long-term facts',
     },
     {
@@ -100,7 +86,6 @@ export class ChatPanel {
       icon: 'calculator',
       placeholder: 'Exact arithmetic and mathematical calculations…',
       prefix: '[Calculate]: ',
-      sample: 'What is the compound interest on ₹2,50,000 at 7.5% for 12 years? Show the steps.',
       description: 'Exact Python arithmetic',
     },
   ];
@@ -117,10 +102,12 @@ export class ChatPanel {
 
   /** Rough draft size: ~4 characters per token for English text. */
   protected readonly draftTokens = computed(() => Math.ceil(this.draft().trim().length / 4));
-  protected readonly accept = computed(() => this.store.supportedTypes().join(','));
 
   private readonly scroller = viewChild<ElementRef<HTMLElement>>('scroller');
   private readonly textarea = viewChild<ElementRef<HTMLTextAreaElement>>('textarea');
+  private readonly voice = viewChild(VoiceInput);
+  /** The draft when dictation started; speech is appended after it. */
+  private dictationBase = '';
 
   constructor() {
     // Keep the newest output in view while the agent streams.
@@ -143,30 +130,41 @@ export class ChatPanel {
     this.textarea()?.nativeElement.focus();
   }
 
-  protected useTypeSample(type: PromptType) {
-    this.selectedPromptType.set(type.id);
-    this.draft.set(type.sample);
-    this.textarea()?.nativeElement.focus();
-  }
+  /** Send replaces the voice button once there's something to send, unless dictation is running
+   * (or the browser has no speech recognition). */
+  protected readonly showSend = computed(() => {
+    const voice = this.voice();
+    return !voice?.supported || (this.canSend() && !voice.listening());
+  });
 
-  protected submit(text = this.draft()) {
-    if (!text.trim() || this.store.running()) return;
+  protected readonly canSend = computed(
+    () => !!this.draft().trim() || this.attachments().length > 0,
+  );
 
-    let messageToSend = text.trim();
+  protected submit() {
+    if (!this.canSend() || this.store.running()) return;
+
+    let messageToSend = this.draft().trim();
     const type = this.activePromptType();
 
     // If a specialized prompt type is active and user didn't write prefix, prepend it
-    if (type.prefix && !messageToSend.startsWith('[') && !messageToSend.includes(type.prefix)) {
+    if (
+      messageToSend &&
+      type.prefix &&
+      !messageToSend.startsWith('[') &&
+      !messageToSend.includes(type.prefix)
+    ) {
       messageToSend = `${type.prefix}${messageToSend}`;
     }
 
+    this.voice()?.stop();
+    this.store.send(messageToSend, this.attachments());
     this.draft.set('');
-    this.store.send(messageToSend);
+    this.attachments.set([]);
+    this.attachError.set(null);
     this.scrollToBottom();
 
-    // Reset textarea height
-    const el = this.textarea()?.nativeElement;
-    if (el) el.style.height = 'auto';
+    this.fitTextarea();
   }
 
   protected onKeydown(ev: KeyboardEvent) {
@@ -177,16 +175,65 @@ export class ChatPanel {
   }
 
   protected onInput(ev: Event) {
-    const el = ev.target as HTMLTextAreaElement;
-    this.draft.set(el.value);
+    this.draft.set((ev.target as HTMLTextAreaElement).value);
+    this.fitTextarea();
+  }
+
+  protected startDictation() {
+    const draft = this.draft().trimEnd();
+    this.dictationBase = draft ? draft + ' ' : '';
+    this.attachError.set(null);
+  }
+
+  protected onHeard(text: string) {
+    this.draft.set(this.dictationBase + text);
+    queueMicrotask(() => this.fitTextarea()); // after the textarea shows the new value
+  }
+
+  /** Grow the textarea with its content, up to a limit. */
+  private fitTextarea() {
+    const el = this.textarea()?.nativeElement;
+    if (!el) return;
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 220) + 'px';
   }
 
-  /** The composer's "+" adds files to the knowledge base, same as the Docs tab. */
-  protected onAttach(ev: Event) {
+  protected onPick(ev: Event) {
     const input = ev.target as HTMLInputElement;
-    this.store.upload(Array.from(input.files ?? []));
+    this.addFiles(Array.from(input.files ?? []));
     input.value = '';
+  }
+
+  /** Pasting an image (e.g. a screenshot) attaches it. */
+  protected onPaste(ev: ClipboardEvent) {
+    const files = Array.from(ev.clipboardData?.files ?? []);
+    if (!files.length) return;
+    ev.preventDefault();
+    this.addFiles(files);
+  }
+
+  protected onDrop(ev: DragEvent) {
+    ev.preventDefault();
+    this.addFiles(Array.from(ev.dataTransfer?.files ?? []));
+  }
+
+  protected removeAttachment(index: number) {
+    this.attachments.update((l) => l.filter((_, i) => i !== index));
+  }
+
+  private async addFiles(files: File[]) {
+    const tooBig = files.filter((f) => f.type.startsWith('image/') && f.size > MAX_IMAGE_BYTES);
+    const ok = files.filter((f) => !tooBig.includes(f));
+    const room = MAX_ATTACHMENTS - this.attachments().length;
+    this.attachError.set(
+      tooBig.length
+        ? `${tooBig.map((f) => f.name).join(', ')}: images must be under 5 MB.`
+        : ok.length > room
+          ? `You can attach up to ${MAX_ATTACHMENTS} files per message.`
+          : null,
+    );
+    // Read in parallel; the slice also covers files added while these were reading.
+    const read = await Promise.all(ok.slice(0, room).map(readAttachment));
+    this.attachments.update((l) => [...l, ...read].slice(0, MAX_ATTACHMENTS));
   }
 }
